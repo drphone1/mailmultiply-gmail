@@ -1,0 +1,207 @@
+/* General body styling for admin panel */
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    margin: 0;
+    background-color: #f0f2f5; /* Light grey, common in dashboards */
+    color: #333;
+    line-height: 1.6;
+}
+
+.admin-layout {
+    display: flex;
+    min-height: 100vh;
+}
+
+/* Sidebar Styling */
+.sidebar {
+    width: 260px;
+    background-color: #001529; /* Dark blue/charcoal - common for admin sidebars */
+    color: rgba(255, 255, 255, 0.65); /* Light text color for contrast */
+    display: flex;
+    flex-direction: column;
+    padding-top: 20px;
+    box-shadow: 2px 0 6px rgba(0,21,41,.35);
+}
+
+.sidebar-header {
+    padding: 0 20px 20px 20px;
+    text-align: center;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.sidebar-header h2 {
+    color: #fff;
+    margin: 0;
+    font-size: 1.5em;
+}
+
+.menu {
+    flex-grow: 1;
+    overflow-y: auto; /* For scrollable menu if it gets too long */
+}
+
+.menu-brand-section, .menu-general-section {
+    margin-top: 15px;
+    padding: 0 10px;
+}
+
+.menu-brand-title {
+    font-size: 0.9em;
+    color: rgba(255, 255, 255, 0.45);
+    padding: 10px 10px 5px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.menu ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.menu-item {
+    display: block;
+    padding: 12px 15px;
+    color: rgba(255, 255, 255, 0.65);
+    text-decoration: none;
+    border-radius: 4px;
+    margin: 5px 0;
+    transition: background-color 0.2s ease-in-out, color 0.2s ease-in-out;
+    font-size: 0.95em;
+}
+
+.menu-item:hover {
+    background-color: #1890ff; /* Bright blue for hover - common accent */
+    color: #fff;
+}
+
+.menu-item.active {
+    background-color: #1890ff;
+    color: #fff;
+    font-weight: 600;
+}
+
+/* Main Content Styling */
+.main-content {
+    flex-grow: 1;
+    padding: 25px;
+    background-color: #fff; /* White background for content area */
+    overflow-y: auto;
+}
+
+.main-header {
+    padding-bottom: 20px;
+    border-bottom: 1px solid #e8e8e8;
+    margin-bottom: 25px;
+}
+
+.main-header h1 {
+    margin: 0;
+    font-size: 1.8em;
+    color: #333;
+}
+
+.content-section {
+    display: none; /* Hidden by default */
+    padding: 20px;
+    background-color: #ffffff;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.09);
+    margin-bottom: 20px;
+}
+
+.content-section.active {
+    display: block; /* Show active section */
+}
+
+.content-section h2 {
+    color: #007bff; /* Primary color for section titles */
+    margin-top: 0;
+    margin-bottom: 15px;
+    border-bottom: 2px solid #007bff;
+    padding-bottom: 10px;
+    font-size: 1.5em;
+}
+
+/* Form elements styling (can be expanded) */
+.form-group {
+    margin-bottom: 20px;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 600;
+    color: #555;
+}
+
+.form-group input[type="text"],
+.form-group input[type="file"],
+.form-group textarea {
+    width: calc(100% - 22px); /* Account for padding and border */
+    padding: 10px;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+    font-size: 16px;
+    box-sizing: border-box;
+}
+.form-group input[type="file"] {
+    padding: 5px;
+}
+
+
+button[type="submit"] {
+    background-color: #007bff; /* Primary blue */
+    color: white;
+    padding: 12px 20px;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 16px;
+    transition: background-color 0.3s ease;
+}
+
+button[type="submit"]:hover {
+    background-color: #0056b3; /* Darker blue */
+}
+
+/* Simple card styling (can be used for dashboard items) */
+.card {
+    background: #fff;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.24);
+    margin-bottom: 20px;
+}
+.card h3 {
+    margin-top: 0;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .admin-layout {
+        flex-direction: column;
+    }
+    .sidebar {
+        width: 100%;
+        height: auto;
+        padding-top: 10px;
+        box-shadow: 0 2px 6px rgba(0,21,41,.35);
+    }
+    .sidebar-header h2 {
+        font-size: 1.3em;
+    }
+    .menu-item {
+        padding: 10px 15px;
+        font-size: 0.9em;
+    }
+    .main-content {
+        padding: 15px;
+    }
+    .main-header h1 {
+        font-size: 1.5em;
+    }
+    .content-section h2 {
+        font-size: 1.3em;
+    }
+}

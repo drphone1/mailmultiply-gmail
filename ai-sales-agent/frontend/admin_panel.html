@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Sales Agent - Admin Panel</title>
+    <link rel="stylesheet" href="admin_style.css">
+    <!-- Consider adding an icon library like Font Awesome for menu icons -->
+    <!-- <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css"> -->
+</head>
+<body>
+    <div class="admin-layout">
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h2>AI Admin</h2>
+            </div>
+            <nav class="menu">
+                <div class="menu-brand-section">
+                    <h3 class="menu-brand-title">Brand 1 Settings</h3>
+                    <ul>
+                        <li><a href="#brand1-dashboard" class="menu-item" data-target="brand1-dashboard-content">Dashboard</a></li>
+                        <li><a href="#brand1-knowledgebase" class="menu-item" data-target="brand1-knowledgebase-content">Knowledge Base</a></li>
+                        <li><a href="#brand1-whatsapp" class="menu-item" data-target="brand1-whatsapp-content">WhatsApp Config</a></li>
+                        <li><a href="#brand1-analytics" class="menu-item" data-target="brand1-analytics-content">Analytics</a></li>
+                    </ul>
+                </div>
+                <div class="menu-brand-section">
+                    <h3 class="menu-brand-title">Brand 2 Settings</h3>
+                    <ul>
+                        <li><a href="#brand2-dashboard" class="menu-item" data-target="brand2-dashboard-content">Dashboard</a></li>
+                        <li><a href="#brand2-knowledgebase" class="menu-item" data-target="brand2-knowledgebase-content">Knowledge Base</a></li>
+                        <li><a href="#brand2-whatsapp" class="menu-item" data-target="brand2-whatsapp-content">WhatsApp Config</a></li>
+                        <li><a href="#brand2-analytics" class="menu-item" data-target="brand2-analytics-content">Analytics</a></li>
+                    </ul>
+                </div>
+                <div class="menu-brand-section">
+                    <h3 class="menu-brand-title">Brand 3 Settings</h3>
+                    <ul>
+                        <li><a href="#brand3-dashboard" class="menu-item" data-target="brand3-dashboard-content">Dashboard</a></li>
+                        <li><a href="#brand3-knowledgebase" class="menu-item" data-target="brand3-knowledgebase-content">Knowledge Base</a></li>
+                        <li><a href="#brand3-whatsapp" class="menu-item" data-target="brand3-whatsapp-content">WhatsApp Config</a></li>
+                        <li><a href="#brand3-analytics" class="menu-item" data-target="brand3-analytics-content">Analytics</a></li>
+                    </ul>
+                </div>
+                <div class="menu-general-section">
+                     <h3 class="menu-brand-title">General</h3>
+                     <ul>
+                        <li><a href="#settings" class="menu-item" data-target="settings-content">Settings</a></li>
+                        <li><a href="#logout" class="menu-item">Logout</a></li>
+                     </ul>
+                </div>
+            </nav>
+        </aside>
+        <main class="main-content">
+            <header class="main-header">
+                <h1>Welcome, Admin!</h1>
+                <!-- Add user profile info or notifications here -->
+            </header>
+            <section id="brand1-dashboard-content" class="content-section active">
+                <h2>Brand 1 - Dashboard</h2>
+                <p>Overview and key metrics for Brand 1.</p>
+                <!-- Add charts, stats, etc. -->
+            </section>
+            <section id="brand1-knowledgebase-content" class="content-section">
+                <h2>Brand 1 - Knowledge Base Management</h2>
+                <p>Use the old admin page for now, or we can build a new one here.</p>
+                <p><a href="admin.html" target="_blank">Open Current Ingest Form (New Tab)</a></p>
+                <!-- Add UI for uploading files, viewing/deleting sources for Brand 1 -->
+            </section>
+            <section id="brand1-whatsapp-content" class="content-section">
+                <h2>Brand 1 - WhatsApp Configuration</h2>
+                <p>Settings for WhatsApp integration for Brand 1.</p>
+                <form>
+                    <div class="form-group">
+                        <label for="b1-wa-token">WhatsApp API Token:</label>
+                        <input type="text" id="b1-wa-token" name="b1-wa-token" placeholder="Enter Token for Brand 1">
+                    </div>
+                    <div class="form-group">
+                        <label for="b1-wa-phone-id">WhatsApp Phone Number ID:</label>
+                        <input type="text" id="b1-wa-phone-id" name="b1-wa-phone-id" placeholder="Enter Phone ID for Brand 1">
+                    </div>
+                    <button type="submit">Save WhatsApp Config (Brand 1)</button>
+                </form>
+            </section>
+            <section id="brand1-analytics-content" class="content-section">
+                <h2>Brand 1 - Analytics</h2>
+                <p>Analytics and reports for Brand 1 interactions.</p>
+            </section>
+
+            <!-- Sections for Brand 2 -->
+            <section id="brand2-dashboard-content" class="content-section">
+                <h2>Brand 2 - Dashboard</h2>
+                <p>Overview and key metrics for Brand 2.</p>
+            </section>
+            <section id="brand2-knowledgebase-content" class="content-section">
+                <h2>Brand 2 - Knowledge Base Management</h2>
+                <p>Manage data sources for Brand 2.</p>
+            </section>
+            <section id="brand2-whatsapp-content" class="content-section">
+                <h2>Brand 2 - WhatsApp Configuration</h2>
+                <p>Settings for WhatsApp integration for Brand 2.</p>
+            </section>
+            <section id="brand2-analytics-content" class="content-section">
+                <h2>Brand 2 - Analytics</h2>
+                <p>Analytics and reports for Brand 2 interactions.</p>
+            </section>
+
+            <!-- Sections for Brand 3 -->
+            <section id="brand3-dashboard-content" class="content-section">
+                <h2>Brand 3 - Dashboard</h2>
+                <p>Overview and key metrics for Brand 3.</p>
+            </section>
+            <section id="brand3-knowledgebase-content" class="content-section">
+                <h2>Brand 3 - Knowledge Base Management</h2>
+                <p>Manage data sources for Brand 3.</p>
+            </section>
+            <section id="brand3-whatsapp-content" class="content-section">
+                <h2>Brand 3 - WhatsApp Configuration</h2>
+                <p>Settings for WhatsApp integration for Brand 3.</p>
+            </section>
+            <section id="brand3-analytics-content" class="content-section">
+                <h2>Brand 3 - Analytics</h2>
+                <p>Analytics and reports for Brand 3 interactions.</p>
+            </section>
+
+            <section id="settings-content" class="content-section">
+                <h2>General Settings</h2>
+                <p>Application-wide settings.</p>
+            </section>
+        </main>
+    </div>
+    <script>
+        // Basic script for tab-like navigation
+        document.addEventListener('DOMContentLoaded', () => {
+            const menuItems = document.querySelectorAll('.menu-item');
+            const contentSections = document.querySelectorAll('.content-section');
+            const activeClass = 'active';
+
+            // Function to hide all sections and remove active class from menu
+            function resetActives() {
+                contentSections.forEach(section => section.classList.remove(activeClass));
+                menuItems.forEach(item => item.classList.remove(activeClass));
+            }
+
+            // Show the first brand's dashboard by default
+            const defaultSection = document.getElementById('brand1-dashboard-content');
+            const defaultMenuItem = document.querySelector('a[data-target="brand1-dashboard-content"]');
+            if (defaultSection && defaultMenuItem) {
+                defaultSection.classList.add(activeClass);
+                defaultMenuItem.classList.add(activeClass);
+            }
+
+
+            menuItems.forEach(item => {
+                item.addEventListener('click', (event) => {
+                    const targetId = item.getAttribute('data-target');
+                    if (!targetId) return; // For links like logout
+
+                    event.preventDefault();
+                    resetActives();
+
+                    const targetSection = document.getElementById(targetId);
+                    if (targetSection) {
+                        targetSection.classList.add(activeClass);
+                        item.classList.add(activeClass); // Add active class to the clicked menu item
+                        // Update URL hash (optional)
+                        // window.location.hash = item.getAttribute('href');
+                    }
+                });
+            });
+        });
+    </script>
+</body>
+</html>

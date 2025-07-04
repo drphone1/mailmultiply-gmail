@@ -2,9 +2,10 @@ import os
 import io
 from typing import List, Optional
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request, Response
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware # Import for CORS
+import httpx # For making async HTTP requests if needed by WhatsApp API sending function
 
 import PyPDF2
 import docx
@@ -327,6 +328,187 @@ USER'S QUESTION:
         print(f"Error in /chat endpoint: {e}")
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
 
+
+# --- WhatsApp Integration (Placeholder) ---
+
+# IMPORTANT: You will need to replace these placeholders with actual logic
+# using your chosen WhatsApp API provider (e.g., Twilio, Meta directly).
+
+# This is a placeholder for your WhatsApp Business API token or provider's API key
+WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "YOUR_WHATSAPP_ACCESS_TOKEN")
+# This is a placeholder for your WhatsApp Business Account phone number ID
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "YOUR_WHATSAPP_PHONE_NUMBER_ID")
+# This is the verification token you set in the Meta/Twilio dashboard for webhook setup
+WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "YOUR_CHOSEN_VERIFY_TOKEN")
+
+async def send_whatsapp_message(to_phone_number: str, message_body: str):
+    """
+    Placeholder function to send a message via WhatsApp API.
+    You need to implement this using your WhatsApp API provider's SDK or HTTP requests.
+    Example for Meta Graph API (conceptual):
+    """
+    print(f"Attempting to send WhatsApp message to {to_phone_number}: {message_body}")
+    if WHATSAPP_ACCESS_TOKEN == "YOUR_WHATSAPP_ACCESS_TOKEN" or WHATSAPP_PHONE_NUMBER_ID == "YOUR_WHATSAPP_PHONE_NUMBER_ID":
+        print("WARNING: WhatsApp API credentials are not set. Skipping actual message send.")
+        return {"status": "warning", "message": "WhatsApp API credentials not set."}
+
+    # Example using Meta's Graph API structure (requires httpx or requests library)
+    # Adjust URL and payload according to your provider's documentation
+    api_url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_phone_number,
+        "type": "text",
+        "text": {"body": message_body},
+    }
+
+    try:
+        async with httpx.AsyncClient() as client_http:
+            response = await client_http.post(api_url, json=payload, headers=headers)
+            response.raise_for_status()  # Raise an exception for HTTP errors
+            print(f"WhatsApp message sent successfully: {response.json()}")
+            return {"status": "success", "response": response.json()}
+    except httpx.HTTPStatusError as e:
+        print(f"Error sending WhatsApp message: {e.response.status_code} - {e.response.text}")
+        return {"status": "error", "message": f"HTTP Error: {e.response.status_code} - {e.response.text}"}
+    except Exception as e:
+        print(f"Generic error sending WhatsApp message: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/whatsapp/webhook")
+async def whatsapp_webhook_verify(request: Request):
+    """
+    Webhook verification for WhatsApp.
+    (Usually required by Meta/Twilio during webhook setup)
+    """
+    print("GET /whatsapp/webhook received for verification")
+    # Extract query parameters for verification
+    mode = request.query_params.get("hub.mode")
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge")
+
+    print(f"Mode: {mode}, Token: {token}, Challenge: {challenge}")
+
+    if mode and token:
+        if mode == "subscribe" and token == WHATSAPP_VERIFY_TOKEN:
+            print(f"Webhook verified successfully! Responding with challenge: {challenge}")
+            return PlainTextResponse(content=challenge, status_code=200)
+        else:
+            print("Webhook verification failed: Mode or token mismatch.")
+            raise HTTPException(status_code=403, detail="Verification token mismatch")
+    else:
+        print("Webhook verification failed: Missing mode or token.")
+        raise HTTPException(status_code=400, detail="Missing verification parameters")
+
+
+@app.post("/whatsapp/webhook")
+async def whatsapp_webhook_handler(request: Request):
+    """
+    Handles incoming WhatsApp messages.
+    """
+    print("POST /whatsapp/webhook received message")
+    try:
+        payload = await request.json()
+        print(f"Received payload: {payload}")
+
+        # --- Payload structure can vary greatly based on provider and message type ---
+        # This is a common structure for Meta's API for text messages.
+        # You MUST adapt this to your specific provider's payload structure.
+        # Example: Twilio payload is different.
+
+        # Check if it's a message notification
+        if payload.get("object") == "whatsapp_business_account":
+            entries = payload.get("entry", [])
+            for entry in entries:
+                changes = entry.get("changes", [])
+                for change in changes:
+                    value = change.get("value", {})
+                    if value.get("messaging_product") == "whatsapp":
+                        messages = value.get("messages", [])
+                        if messages: # If there are messages
+                            message_data = messages[0] # Process the first message
+                            if message_data.get("type") == "text":
+                                user_phone_number = message_data.get("from")
+                                user_query = message_data.get("text", {}).get("body")
+                                message_id = message_data.get("id") # Useful for logging/deduplication
+
+                                print(f"Received message from {user_phone_number}: '{user_query}' (ID: {message_id})")
+
+                                if not user_query or not user_phone_number:
+                                    print("Missing user query or phone number in message.")
+                                    continue # Skip this message
+
+                                # --- Use RAG pipeline to get an answer ---
+                                try:
+                                    query_embedding = get_embedding(user_query)
+                                    results = collection.query(
+                                        query_embeddings=[query_embedding],
+                                        n_results=4, # Top 4 chunks
+                                        include=['documents']
+                                    )
+                                    retrieved_chunks_list = results.get('documents', [[]])
+                                    retrieved_chunks = retrieved_chunks_list[0] if retrieved_chunks_list else []
+
+                                    if not retrieved_chunks:
+                                        context_for_llm = "No specific information found in the knowledge base for this query."
+                                    else:
+                                        context_for_llm = "\n---\n".join(retrieved_chunks)
+
+                                    my_company_name = "[My Company Name]" # Placeholder
+                                    final_prompt = f"""You are an expert, friendly, and highly effective AI sales agent for '{my_company_name}'. Your goal is to help customers and persuade them to buy our products. Use the following context, which contains information from our company's documents and website, to answer the user's question. Answer only based on the provided context. If the answer is not in the context, politely state that you do not have that specific information.
+
+CONTEXT:
+---
+{context_for_llm}
+---
+
+USER'S QUESTION (from WhatsApp):
+{user_query}"""
+
+                                    print(f"\n--- Sending to LLM (from WhatsApp) --- \nPrompt: {final_prompt}\n---------------------\n")
+
+                                    # Ensure genai and chat_model are initialized
+                                    if not GOOGLE_API_KEY or not genai:
+                                        ai_response = "AI model is not configured. Please contact support."
+                                    else:
+                                        chat_model = genai.GenerativeModel('gemini-pro')
+                                        llm_response_obj = chat_model.generate_content(final_prompt)
+                                        ai_response = llm_response_obj.text if hasattr(llm_response_obj, 'text') else str(llm_response_obj)
+
+                                    print(f"AI Response: {ai_response}")
+
+                                    # Send the AI's response back to the user via WhatsApp
+                                    await send_whatsapp_message(user_phone_number, ai_response)
+
+                                except Exception as e:
+                                    print(f"Error processing message for {user_phone_number}: {e}")
+                                    # Optionally send an error message back to the user
+                                    await send_whatsapp_message(user_phone_number, "Sorry, I encountered an error trying to process your request.")
+                            else:
+                                print(f"Received non-text message type: {message_data.get('type')}. Skipping.")
+                        else: # No messages in the value
+                            print("No messages found in the change value.")
+                    # Handle other types of changes/values if necessary (e.g., message status updates)
+                    elif value.get("statuses"):
+                        print(f"Received a status update: {value.get('statuses')}")
+                        # You might want to log message delivery statuses here
+                    else:
+                        print(f"Change value not a message or status: {value}")
+
+
+        return Response(content="EVENT_RECEIVED", status_code=200) # Acknowledge receipt of the event
+
+    except Exception as e:
+        print(f"Error in WhatsApp webhook handler: {e}")
+        # It's crucial to return a 200 OK to WhatsApp, otherwise they might stop sending webhooks.
+        # Log the error internally but don't necessarily send a 500 back to WhatsApp.
+        return Response(content="Error processing event", status_code=200) # Or 500 if appropriate for your debugging
+
 # --- Main execution (for local development) ---
 if __name__ == "__main__":
     import uvicorn
@@ -336,7 +518,15 @@ if __name__ == "__main__":
         print("Please set it before running the application, e.g.:")
         print("export GOOGLE_API_KEY='your_actual_api_key'")
     else:
-        print("GOOGLE_API_KEY found. Starting server...")
+        print("GOOGLE_API_KEY found.")
+
+    if WHATSAPP_VERIFY_TOKEN == "YOUR_CHOSEN_VERIFY_TOKEN":
+        print("WARNING: WHATSAPP_VERIFY_TOKEN is not set in environment variables. Using default placeholder.")
+    if WHATSAPP_ACCESS_TOKEN == "YOUR_WHATSAPP_ACCESS_TOKEN":
+        print("WARNING: WHATSAPP_ACCESS_TOKEN is not set in environment variables. Actual sending will be skipped.")
+    if WHATSAPP_PHONE_NUMBER_ID == "YOUR_WHATSAPP_PHONE_NUMBER_ID":
+        print("WARNING: WHATSAPP_PHONE_NUMBER_ID is not set in environment variables. Actual sending will be impacted.")
+
 
     # Create data directory if it doesn't exist, relative to this script
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -344,25 +534,27 @@ if __name__ == "__main__":
     os.makedirs(data_dir_abs, exist_ok=True)
     print(f"ChromaDB data path: {os.path.abspath(data_dir_abs)}")
 
-
+    print("Starting server...")
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
 # Instructions for running:
 # 1. Save this file as `main.py` in the `backend` directory.
-# 2. Ensure you have `requirements.txt` in the same directory.
+# 2. Ensure you have `requirements.txt` in the same directory. (Add `httpx` if not already there)
 # 3. Install dependencies: `pip install -r requirements.txt`
-# 4. Set your Google API Key: `export GOOGLE_API_KEY='your_google_api_key'`
+# 4. Set your Environment Variables:
+#    `export GOOGLE_API_KEY='your_google_api_key'`
+#    `export WHATSAPP_VERIFY_TOKEN='your_chosen_verify_token_for_webhook_setup'`
+#    `export WHATSAPP_ACCESS_TOKEN='your_whatsapp_business_api_token'`
+#    `export WHATSAPP_PHONE_NUMBER_ID='your_whatsapp_business_phone_number_id'`
 # 5. Run the server: `python main.py` (or `uvicorn main:app --reload` for development)
-# The server will be available at http://localhost:8000
-# The ChromaDB data will be stored in `../data` relative to `main.py` (i.e., `ai-sales-agent/data`)
-# To create the data directory correctly, ensure `ai-sales-agent/data` exists.
-# The script now attempts to create this directory if it doesn't exist.
+#    The server will be available at http://localhost:8000
+#    The WhatsApp webhook endpoint will be http://<your_public_ngrok_url>/whatsapp/webhook
+
+# When setting up the webhook with Meta/Twilio, you'll need a publicly accessible URL.
+# Use a tool like ngrok (https://ngrok.com/) during development: `./ngrok http 8000`
+# Then use the https URL ngrok provides (e.g., https://xxxx-yyy-zzz.ngrok.io/whatsapp/webhook)
+# in your WhatsApp API provider's dashboard.
 print(f"Current working directory: {os.getcwd()}")
-# Adjust CHROMA_DATA_PATH if main.py is run from a different working directory than 'backend'
-# For example, if run from 'ai-sales-agent', CHROMA_DATA_PATH should be "./data"
-# The current setup assumes `python main.py` is run from within the `backend` directory.
-# The `os.path.join(script_dir, CHROMA_DATA_PATH)` should make it robust.
-# Final check for data path:
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 _data_dir_abs = os.path.join(_script_dir, CHROMA_DATA_PATH)
 if not os.path.exists(_data_dir_abs):

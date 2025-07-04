@@ -8,3 +8,4 @@ requests
 langchain
 chromadb
 google-generativeai
+httpx
