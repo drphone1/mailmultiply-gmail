@@ -2,562 +2,589 @@ import os
 import io
 from typing import List, Optional
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request, Response
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request, Response, Depends
 from fastapi.responses import JSONResponse, PlainTextResponse
-from fastapi.middleware.cors import CORSMiddleware # Import for CORS
+from fastapi.middleware.cors import CORSMiddleware
 import httpx # For making async HTTP requests if needed by WhatsApp API sending function
+from sqlalchemy.orm import Session
+import csv # For parsing CSV files
+import vobject # For parsing VCF files (vobject library) - make sure 'vobject' is in requirements.txt
 
 import PyPDF2
-import docx
+import docx # Make sure 'python-docx' is in requirements.txt
 import requests
-from bs4 import BeautifulSoup
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-import chromadb
-import google.generativeai as genai
+from bs4 import BeautifulSoup # Make sure 'beautifulsoup4' is in requirements.txt
+from langchain.text_splitter import RecursiveCharacterTextSplitter # Make sure 'langchain' is in requirements.txt
+import chromadb # Make sure 'chromadb' is in requirements.txt
+import google.generativeai as genai # Make sure 'google-generativeai' is in requirements.txt
 
 # --- Configuration ---
-# IMPORTANT: Set your GOOGLE_API_KEY environment variable before running the app.
-# You can do this by running `export GOOGLE_API_KEY='your_api_key_here'` in your terminal
-# or by setting it directly in your environment.
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GOOGLE_API_KEY:
     print("Warning: GOOGLE_API_KEY not found in environment variables. API calls will fail.")
-    # raise ValueError("GOOGLE_API_KEY not found in environment variables.") # Or handle more gracefully
 
-# Configure the generative AI model
 try:
     genai.configure(api_key=GOOGLE_API_KEY)
     embedding_model = genai.GenerativeModel('models/embedding-001')
-    # It's good practice to specify the model name for chat completions too
-    # For example: genai.GenerativeModel('gemini-pro')
-    # However, the prompt uses a generic 'generative model', so we'll prepare for that.
 except Exception as e:
     print(f"Error configuring Google Generative AI: {e}. Ensure API key is valid and model exists.")
-    embedding_model = None # Set to None to indicate failure
+    embedding_model = None
 
-# ChromaDB setup
-CHROMA_DATA_PATH = "../data" # Relative to main.py
-COLLECTION_NAME = "sales_data"
+# ChromaDB setup (for RAG knowledge base)
+CHROMA_DATA_PATH = "../data_chroma" # Renamed to avoid conflict if user has a general 'data' dir
+COLLECTION_NAME = "sales_rag_kb"
 
-# Initialize ChromaDB client
+# --- Database (PostgreSQL), Models, Schemas, CRUD ---
+from . import crud, models, schemas # . refers to current directory
+from .database import SessionLocal, engine, get_db, Base as DB_Base
+
+# Create database tables if they don't exist
 try:
-    client = chromadb.PersistentClient(path=CHROMA_DATA_PATH)
-    # Get or create the collection
-    collection = client.get_or_create_collection(name=COLLECTION_NAME)
-except Exception as e:
-    print(f"Error initializing ChromaDB: {e}")
-    client = None
-    collection = None
+    DB_Base.metadata.create_all(bind=engine)
+    print("PostgreSQL database tables checked/created based on models.py.")
+except Exception as e_pg:
+    print(f"ERROR connecting to or creating PostgreSQL tables: {e_pg}")
+    print("Please ensure your DATABASE_URL in .env is correct and PostgreSQL server is running.")
+    # Depending on severity, you might want to exit or prevent app startup
+    # For now, it will likely fail later if DB is not available.
+
+
+# Initialize ChromaDB client (for RAG, separate from PostgreSQL)
+try:
+    # Ensure ChromaDB data path exists
+    os.makedirs(CHROMA_DATA_PATH, exist_ok=True)
+    chroma_client = chromadb.PersistentClient(path=CHROMA_DATA_PATH)
+    rag_collection = chroma_client.get_or_create_collection(name=COLLECTION_NAME)
+    print(f"ChromaDB client and RAG collection '{COLLECTION_NAME}' initialized at '{CHROMA_DATA_PATH}'.")
+except Exception as e_chroma:
+    print(f"Error initializing ChromaDB: {e_chroma}")
+    chroma_client = None
+    rag_collection = None
 
 
 # --- FastAPI App Initialization ---
-app = FastAPI()
+app = FastAPI(title="AI Sales Agent API")
 
-# Add CORS middleware to allow requests from the frontend
-# This is important for local development when frontend and backend are on different ports.
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-
-# --- Helper Functions ---
+# --- Helper Functions for Text Extraction (RAG) ---
 def extract_text_from_pdf(file_stream: io.BytesIO) -> str:
-    """Extracts text from a PDF file stream."""
+    text = ""
     try:
         reader = PyPDF2.PdfReader(file_stream)
-        text = ""
         for page in reader.pages:
             text += page.extract_text() or ""
-        return text
     except Exception as e:
         print(f"Error extracting text from PDF: {e}")
-        return ""
+    return text
 
 def extract_text_from_docx(file_stream: io.BytesIO) -> str:
-    """Extracts text from a DOCX file stream."""
+    text = ""
     try:
         doc = docx.Document(file_stream)
-        text = ""
         for para in doc.paragraphs:
             text += para.text + "\n"
-        return text
     except Exception as e:
         print(f"Error extracting text from DOCX: {e}")
-        return ""
+    return text
 
 def scrape_text_from_url(url: str) -> str:
-    """Scrapes all text content from a given URL."""
+    text = ""
     try:
         response = requests.get(url, timeout=10)
-        response.raise_for_status()  # Raise an exception for HTTP errors
+        response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
-        # Remove script and style elements
         for script_or_style in soup(["script", "style"]):
             script_or_style.decompose()
         text = soup.get_text(separator='\n', strip=True)
-        return text
     except requests.exceptions.RequestException as e:
         print(f"Error fetching URL {url}: {e}")
-        return ""
     except Exception as e:
         print(f"Error scraping text from URL {url}: {e}")
-        return ""
+    return text
 
-def get_embedding(text: str):
-    """Generates embedding for a given text using Google's model."""
+def get_embedding(text_to_embed: str): # Renamed parameter for clarity
     if not embedding_model:
         raise HTTPException(status_code=500, detail="Embedding model not initialized.")
     try:
-        result = genai.embed_content(model="models/embedding-001", content=text)
+        result = genai.embed_content(model="models/embedding-001", content=text_to_embed)
         return result['embedding']
     except Exception as e:
         print(f"Error generating embedding: {e}")
-        # Potentially raise HTTPException or return a specific error indicator
         raise HTTPException(status_code=500, detail=f"Error generating embedding: {e}")
 
+# --- Helper Functions for VCF/CSV Parsing (CRM) ---
+def parse_vcf_contacts(file_stream: io.BytesIO) -> List[schemas.ContactCreate]:
+    # (Implementation from previous step - kept concise for brevity here, assume it's correct)
+    # ... (ensure this function correctly parses VCF and returns List[schemas.ContactCreate])
+    contacts_data = []
+    try:
+        vcf_content = file_stream.read().decode('utf-8', errors='ignore')
+        for vcard in vobject.readComponents(vcf_content):
+            name = None
+            phone = None
+            email_vcf = None
+            if hasattr(vcard, 'fn'): name = str(vcard.fn.value)
+            elif hasattr(vcard, 'n'): name = " ".join(filter(None, [vcard.n.value.prefix, vcard.n.value.given, vcard.n.value.additional, vcard.n.value.family, vcard.n.value.suffix]))
 
-# --- API Endpoints ---
-@app.post("/ingest")
-async def ingest_data(
-    files: List[UploadFile] = File(None),
-    url: Optional[str] = Form(None)
-):
-    """
-    Endpoint to ingest data from uploaded files (PDF, DOCX, TXT) and/or a website URL.
-    Processes the text and stores it in ChromaDB.
-    """
+            if hasattr(vcard, 'tel_list'):
+                # Simple logic: prioritize CELL, then MAIN, then first
+                tels = {tel.singletonparams[0] if tel.singletonparams else 'VOICE': str(tel.value) for tel in vcard.tel_list}
+                phone = tels.get('CELL') or tels.get('MAIN') or next(iter(tels.values()), None)
+
+            if hasattr(vcard, 'email_list'):
+                email_vcf = str(vcard.email_list[0].value)
+
+            if phone:
+                # Basic phone normalization (can be greatly improved)
+                phone = "".join(filter(str.isdigit, phone))
+                if len(phone) > 10 and not phone.startswith('+'): # very naive
+                    phone = f"+{phone}"
+
+                contacts_data.append(schemas.ContactCreate(phone_number=phone, name_from_vcf=name, email=email_vcf))
+    except Exception as e:
+        print(f"Error parsing VCF: {e}")
+    return contacts_data
+
+
+def parse_csv_contacts(file_stream: io.BytesIO) -> List[schemas.ContactCreate]:
+    # (Implementation from previous step - kept concise, assume it's correct)
+    # ... (ensure this function correctly parses CSV and returns List[schemas.ContactCreate])
+    contacts_data = []
+    try:
+        csv_content = file_stream.read().decode('utf-8', errors='ignore')
+        reader = csv.DictReader(io.StringIO(csv_content))
+        phone_fields = ['phone', 'phonenumber', 'mobile', 'tel', 'contact', 'number']
+        name_fields = ['name', 'fullname', 'contactname']
+        email_fields = ['email', 'emailaddress']
+
+        phone_col, name_col, email_col = None, None, None
+        if reader.fieldnames:
+            lc_fieldnames = [f.lower() for f in reader.fieldnames]
+            for i, h in enumerate(lc_fieldnames):
+                if not phone_col and h in phone_fields: phone_col = reader.fieldnames[i]
+                if not name_col and h in name_fields: name_col = reader.fieldnames[i]
+                if not email_col and h in email_fields: email_col = reader.fieldnames[i]
+
+        if not phone_col: raise ValueError("CSV must contain a phone column.")
+
+        for row in reader:
+            phone = row.get(phone_col, "").strip()
+            phone = "".join(filter(str.isdigit, phone)) # Basic normalization
+            if len(phone) > 10 and not phone.startswith('+'): phone = f"+{phone}"
+
+            name = row.get(name_col) if name_col else None
+            email_csv = row.get(email_col) if email_col else None
+            if phone:
+                contacts_data.append(schemas.ContactCreate(phone_number=phone, name_from_vcf=name, email=email_csv))
+    except Exception as e:
+        print(f"Error parsing CSV contacts: {e}")
+    return contacts_data
+
+def parse_csv_scraped_group_members(file_stream: io.BytesIO) -> List[schemas.ScrapedMember]:
+    # (Implementation from previous step - kept concise, assume it's correct)
+    # ... (ensure this function correctly parses CSV and returns List[schemas.ScrapedMember])
+    members_data = []
+    try:
+        csv_content = file_stream.read().decode('utf-8', errors='ignore')
+        reader = csv.DictReader(io.StringIO(csv_content))
+        phone_col, name_col = 'phone_number', 'name_from_profile'
+        if phone_col not in reader.fieldnames: raise ValueError("CSV must contain 'phone_number' column.")
+
+        for row in reader:
+            phone = row.get(phone_col, "").strip()
+            phone = "".join(filter(str.isdigit, phone))
+            if len(phone) > 10 and not phone.startswith('+'): phone = f"+{phone}"
+            name = row.get(name_col)
+            if phone:
+                members_data.append(schemas.ScrapedMember(phone_number=phone, name_from_profile=name))
+    except Exception as e:
+        print(f"Error parsing CSV scraped members: {e}")
+    return members_data
+
+# --- RAG Knowledge Base API Endpoint ---
+@app.post("/ingest", summary="Ingest documents and URLs into RAG knowledge base")
+async def ingest_data_endpoint( files: List[UploadFile] = File(None), url: Optional[str] = Form(None)):
     if not files and not url:
         raise HTTPException(status_code=400, detail="No files or URL provided.")
-    if not client or not collection:
-        raise HTTPException(status_code=500, detail="ChromaDB not initialized.")
+    if not chroma_client or not rag_collection:
+        raise HTTPException(status_code=500, detail="ChromaDB RAG collection not initialized.")
     if not embedding_model:
-        raise HTTPException(status_code=500, detail="Embedding model not initialized. Check GOOGLE_API_KEY.")
+        raise HTTPException(status_code=500, detail="Embedding model not initialized.")
 
     all_text = ""
-
-    # Process uploaded files
     if files:
-        for file in files:
-            file_stream = io.BytesIO(await file.read())
-            filename = file.filename.lower()
-            if filename.endswith(".pdf"):
-                print(f"Processing PDF: {file.filename}")
-                all_text += extract_text_from_pdf(file_stream) + "\n"
-            elif filename.endswith(".docx"):
-                print(f"Processing DOCX: {file.filename}")
-                all_text += extract_text_from_docx(file_stream) + "\n"
-            elif filename.endswith(".txt"):
-                print(f"Processing TXT: {file.filename}")
-                all_text += file_stream.read().decode('utf-8', errors='ignore') + "\n"
-            else:
-                print(f"Skipping unsupported file: {file.filename}")
+        for file_obj in files: # Renamed to avoid conflict
+            file_stream = io.BytesIO(await file_obj.read())
+            filename = file_obj.filename.lower()
+            if filename.endswith(".pdf"): all_text += extract_text_from_pdf(file_stream) + "\n"
+            elif filename.endswith(".docx"): all_text += extract_text_from_docx(file_stream) + "\n"
+            elif filename.endswith(".txt"): all_text += file_stream.read().decode('utf-8', errors='ignore') + "\n"
+            else: print(f"Skipping unsupported file: {file_obj.filename}")
             file_stream.close()
-
-    # Process URL
-    if url:
-        print(f"Processing URL: {url}")
-        all_text += scrape_text_from_url(url) + "\n"
+    if url: all_text += scrape_text_from_url(url) + "\n"
 
     if not all_text.strip():
-        return JSONResponse(
-            status_code=400,
-            content={"status": "error", "message": "No text content extracted from provided sources."}
-        )
+        return JSONResponse(status_code=400, content={"status": "error", "message": "No text content extracted."})
 
-    # Split text into chunks
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=800,
-        chunk_overlap=150,
-        length_function=len
-    )
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
     chunks = text_splitter.split_text(all_text)
-    print(f"Split text into {len(chunks)} chunks.")
-
     if not chunks:
-        return JSONResponse(
-            status_code=400,
-            content={"status": "error", "message": "No text chunks generated after processing."}
-        )
+        return JSONResponse(status_code=400, content={"status": "error", "message": "No text chunks generated."})
 
-    # Generate embeddings and store in ChromaDB
-    doc_ids = []
-    embeddings_list = []
-    documents_list = []
-
+    doc_ids, embeddings_list, documents_list = [], [], []
     for i, chunk in enumerate(chunks):
         try:
             embedding = get_embedding(chunk)
-            doc_ids.append(f"doc_{i}") # Simple unique ID for each chunk
+            doc_ids.append(f"doc_ingest_{i}_{len(chunk)}") # More unique ID
             embeddings_list.append(embedding)
             documents_list.append(chunk)
-        except HTTPException as e: # Catch embedding errors specifically
-            return JSONResponse(
-                status_code=e.status_code,
-                content={"status": "error", "message": f"Failed to process chunk {i+1}/{len(chunks)}: {e.detail}"}
-            )
-        except Exception as e:
-            print(f"Skipping chunk {i} due to error during embedding: {e}")
-            continue # Skip this chunk and try to process others
+        except Exception as e_emb: # Catch embedding errors specifically
+            print(f"Error embedding chunk {i}: {e_emb}")
+            # Optionally skip or return error
+            # For now, we skip the chunk
+            continue
 
     if not documents_list:
-         return JSONResponse(
-            status_code=500,
-            content={"status": "error", "message": "No documents could be embedded. Check embedding model and API key."}
-        )
-
+         return JSONResponse(status_code=500, content={"status": "error", "message": "No documents could be embedded."})
     try:
-        # Clear existing data in the collection before adding new data for simplicity.
-        # For production, you might want a more sophisticated update strategy.
-        # Count items before clearing (optional, for logging)
-        # current_count = collection.count()
-        # if current_count > 0:
-        #     print(f"Clearing {current_count} existing items from collection '{COLLECTION_NAME}'...")
-        #     # This is a bit tricky with ChromaDB's API for "all" items.
-        #     # A common way is to delete by IDs if you know them, or recreate the collection.
-        #     # For simplicity here, we'll just add, which might lead to duplicates if run multiple times
-        #     # without a proper clearing mechanism. A better way is to manage IDs.
-        #     # Or, delete and recreate the collection:
-        #     # client.delete_collection(name=COLLECTION_NAME)
-        #     # collection = client.get_or_create_collection(name=COLLECTION_NAME)
-        #     # print(f"Collection '{COLLECTION_NAME}' cleared and recreated.")
-        #
-        # Let's assume for now we are adding, and duplicates are handled by the user or by ID management
-        # If the collection might contain old data, it's better to clear it first.
-        # One way to clear (if you don't care about existing data):
-        if collection.count() > 0:
-            print(f"Collection '{COLLECTION_NAME}' already has data. For this example, we will add to it. Consider a clearing strategy for production.")
-            # client.delete_collection(name=COLLECTION_NAME)
-            # collection = client.get_or_create_collection(name=COLLECTION_NAME)
-            # print(f"Collection '{COLLECTION_NAME}' cleared and recreated for new ingestion.")
+        if rag_collection.count() > 0:
+            print(f"RAG Collection '{COLLECTION_NAME}' has data. New data will be added.")
+        rag_collection.add(embeddings=embeddings_list, documents=documents_list, ids=doc_ids)
+    except Exception as e_chroma_add:
+        raise HTTPException(status_code=500, detail=f"Error storing data in RAG DB: {e_chroma_add}")
 
+    return JSONResponse(status_code=200, content={"status": "success", "message": f"Knowledge base updated. Added {len(doc_ids)} text chunks."})
 
-        collection.add(
-            embeddings=embeddings_list,
-            documents=documents_list,
-            ids=doc_ids
-        )
-        print(f"Successfully added {len(doc_ids)} items to ChromaDB collection '{COLLECTION_NAME}'.")
-    except Exception as e:
-        print(f"Error adding data to ChromaDB: {e}")
-        raise HTTPException(status_code=500, detail=f"Error storing data in vector database: {e}")
-
-    return JSONResponse(
-        status_code=200,
-        content={"status": "success", "message": f"Knowledge base updated. Added {len(doc_ids)} text chunks."}
-    )
-
-
-@app.post("/chat")
-async def chat_with_agent(query_request: dict):
-    """
-    Endpoint to handle chat queries.
-    Retrieves relevant context from ChromaDB and uses a generative model to answer.
-    """
-    user_query = query_request.get("query")
+# --- Web Chat API Endpoint (RAG based) ---
+@app.post("/chat", summary="Handle web chat queries using RAG")
+async def chat_with_agent_endpoint(query_request: schemas.ChatQueryRequest, db: Session = Depends(get_db)): # Added db for potential future use
+    user_query = query_request.query
     if not user_query:
         raise HTTPException(status_code=400, detail="Query not provided.")
-    if not client or not collection:
-        raise HTTPException(status_code=500, detail="ChromaDB not initialized.")
-    if not embedding_model: # Check if embedding model is available
-        raise HTTPException(status_code=500, detail="Embedding model not initialized. Cannot process query.")
+    if not rag_collection or not embedding_model:
+        raise HTTPException(status_code=500, detail="RAG or Embedding model not initialized.")
 
     try:
-        # 1. Generate embedding for the user's query
         query_embedding = get_embedding(user_query)
+        results = rag_collection.query(query_embeddings=[query_embedding], n_results=4, include=['documents'])
+        retrieved_chunks = results.get('documents', [[]])[0]
+        context_for_llm = "\n---\n".join(retrieved_chunks) if retrieved_chunks else "No specific information found."
 
-        # 2. Query ChromaDB for top 4 similar text chunks
-        results = collection.query(
-            query_embeddings=[query_embedding],
-            n_results=4,
-            include=['documents'] # We only need the document text
-        )
+        default_wa_account = crud.get_default_whatsapp_account(db) # Get company name from default account if set
+        my_company_name = default_wa_account.account_name if default_wa_account else "[My Company Name]"
 
-        retrieved_chunks = results.get('documents', [[]])[0] # Get documents from the first query result
-
-        if not retrieved_chunks:
-            # Fallback if no relevant documents are found
-            context_for_llm = "No specific information found in the knowledge base for this query."
-        else:
-            context_for_llm = "\n---\n".join(retrieved_chunks)
-
-        # 3. Construct the prompt for the generative model
-        # IMPORTANT: Replace '[My Company Name]' with your actual company name.
-        my_company_name = "[My Company Name]" # Placeholder
         final_prompt = f"""You are an expert, friendly, and highly effective AI sales agent for '{my_company_name}'. Your goal is to help customers and persuade them to buy our products. Use the following context, which contains information from our company's documents and website, to answer the user's question. Answer only based on the provided context. If the answer is not in the context, politely state that you do not have that specific information.
-
 CONTEXT:
 ---
 {context_for_llm}
 ---
-
 USER'S QUESTION:
 {user_query}"""
-
-        # 4. Send the prompt to the generative model (e.g., Gemini Pro)
-        # This is a placeholder for the actual API call.
-        # You'll need to use the `google.generativeai` library correctly here.
-        # For example, using `genai.GenerativeModel('gemini-pro').generate_content(...)`
-        print(f"\n--- Sending to LLM --- \nPrompt: {final_prompt}\n---------------------\n")
-
-        # Placeholder for LLM interaction
-        # Replace with actual call to genai.GenerativeModel('gemini-pro').generate_content()
-        try:
-            # Example: Using Gemini Pro (ensure this model is available and configured)
-            chat_model = genai.GenerativeModel('gemini-pro') # Or your chosen chat model
+        if not GOOGLE_API_KEY or not genai:
+            answer = "AI model (LLM) is not configured."
+        else:
+            chat_model = genai.GenerativeModel('gemini-pro')
             llm_response = chat_model.generate_content(final_prompt)
-            # Accessing the text part of the response, structure might vary by model/API version
             answer = llm_response.text if hasattr(llm_response, 'text') else str(llm_response)
-
-        except Exception as e:
-            print(f"Error during LLM call: {e}")
-            # Provide a fallback response if the LLM call fails
-            answer = "I am currently experiencing technical difficulties and cannot process your request. Please try again later."
-            # Optionally, re-raise or return a specific error response
-            # raise HTTPException(status_code=503, detail=f"LLM service unavailable: {e}")
+        return schemas.ChatResponse(response=answer)
+    except Exception as e_chat:
+        print(f"Error in /chat endpoint: {e_chat}")
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e_chat}")
 
 
-        return JSONResponse(content={"response": answer})
+# --- WhatsApp Integration ---
+WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "YOUR_ENV_VERIFY_TOKEN") # Ensure this is set in .env
 
-    except HTTPException as e: # Re-raise HTTPExceptions to return proper FastAPI responses
-        raise e
-    except Exception as e:
-        print(f"Error in /chat endpoint: {e}")
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
+async def send_whatsapp_message_via_api(db: Session, to_phone_number: str, message_body: str, whatsapp_account_id: int):
+    whatsapp_account = crud.get_whatsapp_account(db, account_id=whatsapp_account_id)
+    if not whatsapp_account or not whatsapp_account.access_token or not whatsapp_account.phone_number_id:
+        print(f"Error: WhatsApp account ID {whatsapp_account_id} not configured correctly.")
+        # Log this failure to DB
+        crud.create_conversation_message(db=db, message=schemas.ConversationCreate(
+            contact_phone_number=to_phone_number,
+            whatsapp_account_phone_id="UNKNOWN_ACCOUNT_CONFIG_ERROR", # Placeholder
+            sender_phone="SYSTEM",
+            receiver_phone=to_phone_number,
+            message_text=message_body,
+            direction=schemas.MessageDirection.OUTBOUND,
+            status="failed_account_config"
+        ))
+        return {"status": "error", "message": "WhatsApp account not configured."}
 
+    print(f"Attempting to send WhatsApp message to {to_phone_number} using account {whatsapp_account.account_name}: {message_body}")
+    api_url = f"https://graph.facebook.com/v18.0/{whatsapp_account.phone_number_id}/messages" # Example, adjust version as needed
+    headers = {"Authorization": f"Bearer {whatsapp_account.access_token}", "Content-Type": "application/json"}
+    payload = {"messaging_product": "whatsapp", "to": to_phone_number, "type": "text", "text": {"body": message_body}}
 
-# --- WhatsApp Integration (Placeholder) ---
-
-# IMPORTANT: You will need to replace these placeholders with actual logic
-# using your chosen WhatsApp API provider (e.g., Twilio, Meta directly).
-
-# This is a placeholder for your WhatsApp Business API token or provider's API key
-WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "YOUR_WHATSAPP_ACCESS_TOKEN")
-# This is a placeholder for your WhatsApp Business Account phone number ID
-WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "YOUR_WHATSAPP_PHONE_NUMBER_ID")
-# This is the verification token you set in the Meta/Twilio dashboard for webhook setup
-WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "YOUR_CHOSEN_VERIFY_TOKEN")
-
-async def send_whatsapp_message(to_phone_number: str, message_body: str):
-    """
-    Placeholder function to send a message via WhatsApp API.
-    You need to implement this using your WhatsApp API provider's SDK or HTTP requests.
-    Example for Meta Graph API (conceptual):
-    """
-    print(f"Attempting to send WhatsApp message to {to_phone_number}: {message_body}")
-    if WHATSAPP_ACCESS_TOKEN == "YOUR_WHATSAPP_ACCESS_TOKEN" or WHATSAPP_PHONE_NUMBER_ID == "YOUR_WHATSAPP_PHONE_NUMBER_ID":
-        print("WARNING: WhatsApp API credentials are not set. Skipping actual message send.")
-        return {"status": "warning", "message": "WhatsApp API credentials not set."}
-
-    # Example using Meta's Graph API structure (requires httpx or requests library)
-    # Adjust URL and payload according to your provider's documentation
-    api_url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to_phone_number,
-        "type": "text",
-        "text": {"body": message_body},
-    }
-
+    response_status, wa_message_id = "failed_api_error", None
     try:
-        async with httpx.AsyncClient() as client_http:
-            response = await client_http.post(api_url, json=payload, headers=headers)
-            response.raise_for_status()  # Raise an exception for HTTP errors
-            print(f"WhatsApp message sent successfully: {response.json()}")
-            return {"status": "success", "response": response.json()}
-    except httpx.HTTPStatusError as e:
-        print(f"Error sending WhatsApp message: {e.response.status_code} - {e.response.text}")
-        return {"status": "error", "message": f"HTTP Error: {e.response.status_code} - {e.response.text}"}
-    except Exception as e:
-        print(f"Generic error sending WhatsApp message: {e}")
-        return {"status": "error", "message": str(e)}
+        async with httpx.AsyncClient() as client:
+            api_response = await client.post(api_url, json=payload, headers=headers)
+            api_response.raise_for_status()
+            wa_message_id = api_response.json().get("messages",[{}])[0].get("id")
+            response_status = "sent_to_api" # Or parse actual status from API response
+            print(f"WhatsApp message API call successful (WA_Msg_ID: {wa_message_id}): {api_response.json()}")
+    except httpx.HTTPStatusError as e_http:
+        print(f"Error sending WhatsApp message (HTTP): {e_http.response.status_code} - {e_http.response.text}")
+        response_status = f"failed_http_{e_http.response.status_code}"
+    except Exception as e_gen:
+        print(f"Generic error sending WhatsApp message: {e_gen}")
+        response_status = "failed_exception"
 
+    # Log outbound message to DB
+    crud.create_conversation_message(db=db, message=schemas.ConversationCreate(
+        contact_phone_number=to_phone_number,
+        whatsapp_account_phone_id=whatsapp_account.phone_number_id,
+        sender_phone=whatsapp_account.phone_number_id,
+        receiver_phone=to_phone_number,
+        message_text=message_body,
+        direction=schemas.MessageDirection.OUTBOUND,
+        status=response_status,
+        message_id_whatsapp=wa_message_id
+    ))
+    return {"status": "success" if response_status == "sent_to_api" else "error", "wa_message_id": wa_message_id}
 
-@app.get("/whatsapp/webhook")
-async def whatsapp_webhook_verify(request: Request):
-    """
-    Webhook verification for WhatsApp.
-    (Usually required by Meta/Twilio during webhook setup)
-    """
+@app.get("/whatsapp/webhook", summary="Verify WhatsApp webhook")
+async def whatsapp_webhook_verify_endpoint(request: Request):
     print("GET /whatsapp/webhook received for verification")
-    # Extract query parameters for verification
     mode = request.query_params.get("hub.mode")
     token = request.query_params.get("hub.verify_token")
     challenge = request.query_params.get("hub.challenge")
-
-    print(f"Mode: {mode}, Token: {token}, Challenge: {challenge}")
-
-    if mode and token:
-        if mode == "subscribe" and token == WHATSAPP_VERIFY_TOKEN:
-            print(f"Webhook verified successfully! Responding with challenge: {challenge}")
-            return PlainTextResponse(content=challenge, status_code=200)
-        else:
-            print("Webhook verification failed: Mode or token mismatch.")
-            raise HTTPException(status_code=403, detail="Verification token mismatch")
+    if not WHATSAPP_VERIFY_TOKEN or WHATSAPP_VERIFY_TOKEN == "YOUR_ENV_VERIFY_TOKEN":
+        print("ERROR: WHATSAPP_VERIFY_TOKEN is not set correctly in .env.")
+        raise HTTPException(status_code=500, detail="Server verify token not configured.")
+    if mode == "subscribe" and token == WHATSAPP_VERIFY_TOKEN:
+        print(f"Webhook verified! Responding with challenge: {challenge}")
+        return PlainTextResponse(content=challenge, status_code=200)
     else:
-        print("Webhook verification failed: Missing mode or token.")
-        raise HTTPException(status_code=400, detail="Missing verification parameters")
+        print("Webhook verification failed: Mode or token mismatch.")
+        raise HTTPException(status_code=403, detail="Forbidden: Verification token mismatch")
 
+@app.post("/whatsapp/webhook", summary="Handle incoming WhatsApp messages")
+async def whatsapp_webhook_handler_endpoint(request: Request, db: Session = Depends(get_db)):
+    print("POST /whatsapp/webhook received event")
+    payload = await request.json()
+    print(f"Received payload: {payload}")
 
-@app.post("/whatsapp/webhook")
-async def whatsapp_webhook_handler(request: Request):
-    """
-    Handles incoming WhatsApp messages.
-    """
-    print("POST /whatsapp/webhook received message")
+    default_wa_account = crud.get_default_whatsapp_account(db)
+    if not default_wa_account:
+        print("ERROR: No default WhatsApp account configured to receive messages.")
+        return Response(content="EVENT_RECEIVED_NO_DEFAULT_ACCOUNT_CONFIGURED", status_code=200)
+
     try:
-        payload = await request.json()
-        print(f"Received payload: {payload}")
-
-        # --- Payload structure can vary greatly based on provider and message type ---
-        # This is a common structure for Meta's API for text messages.
-        # You MUST adapt this to your specific provider's payload structure.
-        # Example: Twilio payload is different.
-
-        # Check if it's a message notification
         if payload.get("object") == "whatsapp_business_account":
-            entries = payload.get("entry", [])
-            for entry in entries:
-                changes = entry.get("changes", [])
-                for change in changes:
+            for entry in payload.get("entry", []):
+                for change in entry.get("changes", []):
                     value = change.get("value", {})
-                    if value.get("messaging_product") == "whatsapp":
-                        messages = value.get("messages", [])
-                        if messages: # If there are messages
-                            message_data = messages[0] # Process the first message
-                            if message_data.get("type") == "text":
-                                user_phone_number = message_data.get("from")
-                                user_query = message_data.get("text", {}).get("body")
-                                message_id = message_data.get("id") # Useful for logging/deduplication
+                    if value.get("metadata", {}).get("phone_number_id") != default_wa_account.phone_number_id:
+                        print(f"Webhook for other account ({value.get('metadata', {}).get('phone_number_id')}), skipping.")
+                        continue # Process only for the default account's phone_number_id
 
-                                print(f"Received message from {user_phone_number}: '{user_query}' (ID: {message_id})")
+                    # Handle incoming messages
+                    if "messages" in value:
+                        for message_data in value.get("messages", []):
+                            user_phone_number = message_data.get("from")
+                            message_id_whatsapp = message_data.get("id")
+                            message_type = message_data.get("type")
 
-                                if not user_query or not user_phone_number:
-                                    print("Missing user query or phone number in message.")
-                                    continue # Skip this message
+                            if not user_phone_number:
+                                print("Skipping message: no sender phone number.")
+                                continue
 
-                                # --- Use RAG pipeline to get an answer ---
+                            message_text_content = None
+                            if message_type == "text":
+                                message_text_content = message_data.get("text", {}).get("body")
+                            else: # For non-text, store a placeholder
+                                message_text_content = f"[{message_type.upper()} MESSAGE RECEIVED]"
+
+                            print(f"Incoming '{message_type}' from {user_phone_number} (WA_ID: {message_id_whatsapp}): {message_text_content if message_type == 'text' else ''}")
+
+                            # Save incoming message
+                            crud.create_conversation_message(db=db, message=schemas.ConversationCreate(
+                                contact_phone_number=user_phone_number,
+                                whatsapp_account_phone_id=default_wa_account.phone_number_id,
+                                sender_phone=user_phone_number,
+                                receiver_phone=default_wa_account.phone_number_id,
+                                message_text=message_text_content,
+                                direction=schemas.MessageDirection.INBOUND,
+                                status="received",
+                                message_id_whatsapp=message_id_whatsapp
+                            ))
+
+                            if message_type == "text" and message_text_content:
+                                # --- RAG + LLM response generation ---
                                 try:
-                                    query_embedding = get_embedding(user_query)
-                                    results = collection.query(
-                                        query_embeddings=[query_embedding],
-                                        n_results=4, # Top 4 chunks
-                                        include=['documents']
-                                    )
-                                    retrieved_chunks_list = results.get('documents', [[]])
-                                    retrieved_chunks = retrieved_chunks_list[0] if retrieved_chunks_list else []
-
-                                    if not retrieved_chunks:
-                                        context_for_llm = "No specific information found in the knowledge base for this query."
+                                    if not rag_collection or not embedding_model:
+                                        ai_response_text = "AI knowledge base is not available."
+                                    elif not GOOGLE_API_KEY or not genai:
+                                        ai_response_text = "AI model (LLM) is not configured."
                                     else:
-                                        context_for_llm = "\n---\n".join(retrieved_chunks)
+                                        query_embedding = get_embedding(message_text_content)
+                                        results = rag_collection.query(query_embeddings=[query_embedding], n_results=3, include=['documents'])
+                                        retrieved_chunks = results.get('documents', [[]])[0]
+                                        context_for_llm = "\n---\n".join(retrieved_chunks) if retrieved_chunks else "No specific information found."
 
-                                    my_company_name = "[My Company Name]" # Placeholder
-                                    final_prompt = f"""You are an expert, friendly, and highly effective AI sales agent for '{my_company_name}'. Your goal is to help customers and persuade them to buy our products. Use the following context, which contains information from our company's documents and website, to answer the user's question. Answer only based on the provided context. If the answer is not in the context, politely state that you do not have that specific information.
-
+                                        company_name_for_prompt = default_wa_account.account_name or "[My Company Name]"
+                                        final_prompt = f"""You are an expert, friendly AI sales agent for '{company_name_for_prompt}'. Use the CONTEXT to answer the USER'S QUESTION. If the answer isn't in CONTEXT, say you don't have that info.
 CONTEXT:
 ---
 {context_for_llm}
 ---
+USER'S QUESTION (from WhatsApp user {user_phone_number}):
+{message_text_content}"""
+                                        chat_model_llm = genai.GenerativeModel('gemini-pro') # make configurable later
+                                        llm_response = chat_model_llm.generate_content(final_prompt)
+                                        ai_response_text = llm_response.text if hasattr(llm_response, 'text') else str(llm_response)
 
-USER'S QUESTION (from WhatsApp):
-{user_query}"""
+                                    print(f"AI Response for {user_phone_number}: {ai_response_text}")
+                                    await send_whatsapp_message_via_api(db, user_phone_number, ai_response_text, default_wa_account.id)
+                                except Exception as e_rag_llm:
+                                    print(f"Error during RAG/LLM for {user_phone_number}: {e_rag_llm}")
+                                    error_reply = "Sorry, I had trouble processing that with AI."
+                                    await send_whatsapp_message_via_api(db, user_phone_number, error_reply, default_wa_account.id)
 
-                                    print(f"\n--- Sending to LLM (from WhatsApp) --- \nPrompt: {final_prompt}\n---------------------\n")
+                    # Handle message status updates
+                    elif "statuses" in value:
+                        for status_data in value.get("statuses", []):
+                            wa_msg_id_status = status_data.get("id")
+                            status_val = status_data.get("status")
+                            # TODO: Implement crud.update_conversation_status_by_whatsapp_id(db, wa_msg_id_status, status_val)
+                            print(f"Status update for WA_Msg_ID {wa_msg_id_status}: {status_val}")
+        return Response(content="EVENT_RECEIVED_PROCESSED", status_code=200)
+    except Exception as e_webhook:
+        print(f"FATAL Error in WhatsApp webhook: {e_webhook}")
+        return Response(content="Error processing webhook event", status_code=200) # Always 200 to WA
 
-                                    # Ensure genai and chat_model are initialized
-                                    if not GOOGLE_API_KEY or not genai:
-                                        ai_response = "AI model is not configured. Please contact support."
-                                    else:
-                                        chat_model = genai.GenerativeModel('gemini-pro')
-                                        llm_response_obj = chat_model.generate_content(final_prompt)
-                                        ai_response = llm_response_obj.text if hasattr(llm_response_obj, 'text') else str(llm_response_obj)
+# --- CRM API Endpoints ---
+@app.post("/whatsapp_accounts/", response_model=schemas.WhatsAppAccountResponse, status_code=201, summary="Create a WhatsApp Business Account configuration")
+def admin_create_wa_account(account: schemas.WhatsAppAccountCreate, db: Session = Depends(get_db)):
+    db_account = crud.get_whatsapp_account_by_phone_id(db, phone_number_id=account.phone_number_id)
+    if db_account:
+        raise HTTPException(status_code=400, detail="Account with this phone_number_id already exists.")
+    return crud.create_whatsapp_account(db=db, account=account)
 
-                                    print(f"AI Response: {ai_response}")
+@app.get("/whatsapp_accounts/", response_model=List[schemas.WhatsAppAccountResponse], summary="List configured WhatsApp accounts")
+def admin_read_wa_accounts(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
+    return crud.get_whatsapp_accounts(db, skip=skip, limit=limit)
 
-                                    # Send the AI's response back to the user via WhatsApp
-                                    await send_whatsapp_message(user_phone_number, ai_response)
+@app.get("/whatsapp_accounts/default", response_model=Optional[schemas.WhatsAppAccountResponse], summary="Get the default WhatsApp account")
+def admin_get_default_wa_account(db: Session = Depends(get_db)):
+    # Returns null (None) if no default is set, which is fine for frontend to check.
+    return crud.get_default_whatsapp_account(db)
 
-                                except Exception as e:
-                                    print(f"Error processing message for {user_phone_number}: {e}")
-                                    # Optionally send an error message back to the user
-                                    await send_whatsapp_message(user_phone_number, "Sorry, I encountered an error trying to process your request.")
-                            else:
-                                print(f"Received non-text message type: {message_data.get('type')}. Skipping.")
-                        else: # No messages in the value
-                            print("No messages found in the change value.")
-                    # Handle other types of changes/values if necessary (e.g., message status updates)
-                    elif value.get("statuses"):
-                        print(f"Received a status update: {value.get('statuses')}")
-                        # You might want to log message delivery statuses here
-                    else:
-                        print(f"Change value not a message or status: {value}")
+@app.put("/whatsapp_accounts/{account_id}", response_model=schemas.WhatsAppAccountResponse, summary="Update a WhatsApp account")
+def admin_update_wa_account(account_id: int, account_update_data: schemas.WhatsAppAccountCreate, db: Session = Depends(get_db)):
+    updated_account = crud.update_whatsapp_account(db, account_id=account_id, account_update=account_update_data)
+    if not updated_account:
+        raise HTTPException(status_code=404, detail="WhatsApp account not found.")
+    return updated_account
 
+@app.post("/contacts/upload_vcf_csv", status_code=201, summary="Upload contacts from VCF or CSV file")
+async def admin_upload_contacts_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    if not (file.filename.lower().endswith(".vcf") or file.filename.lower().endswith(".csv")):
+        raise HTTPException(status_code=400, detail="Invalid file type. Upload VCF or CSV.")
 
-        return Response(content="EVENT_RECEIVED", status_code=200) # Acknowledge receipt of the event
+    file_stream = io.BytesIO(await file.read())
+    created_count, updated_count, failed_count = 0, 0, 0
+    errors_log = []
+    parsed_contacts_list: List[schemas.ContactCreate] = [] # Explicit type
+    try:
+        if file.filename.lower().endswith(".vcf"): parsed_contacts_list = parse_vcf_contacts(file_stream)
+        elif file.filename.lower().endswith(".csv"): parsed_contacts_list = parse_csv_contacts(file_stream)
+    except Exception as e_parse:
+        raise HTTPException(status_code=400, detail=f"Error parsing file: {str(e_parse)}")
 
-    except Exception as e:
-        print(f"Error in WhatsApp webhook handler: {e}")
-        # It's crucial to return a 200 OK to WhatsApp, otherwise they might stop sending webhooks.
-        # Log the error internally but don't necessarily send a 500 back to WhatsApp.
-        return Response(content="Error processing event", status_code=200) # Or 500 if appropriate for your debugging
+    for p_contact in parsed_contacts_list:
+        try:
+            db_contact = crud.get_contact_by_phone(db, phone_number=p_contact.phone_number)
+            if db_contact:
+                crud.update_contact(db, contact_id=db_contact.id, contact_update=p_contact)
+                updated_count +=1
+            else:
+                crud.create_contact(db, contact=p_contact)
+                created_count +=1
+        except Exception as e_db_contact:
+            failed_count +=1
+            errors_log.append({"phone": p_contact.phone_number, "error": str(e_db_contact)})
+    return {"message": f"Contacts: {created_count} new, {updated_count} updated, {failed_count} failed.", "errors": errors_log}
+
+@app.post("/contacts/upload_scraped_group_data", status_code=201, summary="Upload scraped group members from CSV")
+async def admin_upload_scraped_data(group_name: str = Form(...), file: UploadFile = File(...), db: Session = Depends(get_db)):
+    if not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Upload CSV for scraped data.")
+
+    file_stream = io.BytesIO(await file.read())
+    parsed_members_list: List[schemas.ScrapedMember] = [] # Explicit type
+    try:
+        parsed_members_list = parse_csv_scraped_group_members(file_stream)
+    except Exception as e_parse_scraped:
+        raise HTTPException(status_code=400, detail=f"Error parsing scraped CSV: {str(e_parse_scraped)}")
+
+    contact_group = crud.get_contact_group_by_name(db, group_name=group_name)
+    if not contact_group:
+        contact_group = crud.create_contact_group(db, group=schemas.ContactGroupCreate(group_name=group_name))
+
+    linked_count, new_contacts_count, errors_log = 0, 0, []
+    for member_data in parsed_members_list:
+        try:
+            contact = crud.get_contact_by_phone(db, phone_number=member_data.phone_number)
+            if not contact:
+                contact_create_data = schemas.ContactCreate(phone_number=member_data.phone_number, name_from_vcf=member_data.name_from_profile)
+                contact = crud.create_contact(db, contact=contact_create_data)
+                new_contacts_count += 1
+            if crud.add_contact_to_group(db, contact_id=contact.id, group_id=contact_group.id):
+                linked_count +=1
+        except Exception as e_db_group:
+            errors_log.append({"phone": member_data.phone_number, "error": str(e_db_group)})
+    return {"message": f"Group '{group_name}': {new_contacts_count} new contacts, {linked_count} members linked. Errors: {len(errors_log)}.", "errors": errors_log}
+
+@app.get("/contacts/", response_model=List[schemas.ContactResponse], summary="List all contacts")
+def admin_read_contacts(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    return crud.get_contacts(db, skip=skip, limit=limit)
+
+@app.get("/contacts/{contact_id}", response_model=schemas.ContactResponse, summary="Get a specific contact by ID")
+def admin_read_contact(contact_id: int, db: Session = Depends(get_db)):
+    db_contact = crud.get_contact(db, contact_id=contact_id)
+    if not db_contact: raise HTTPException(status_code=404, detail="Contact not found")
+    return db_contact
+
+@app.get("/contacts/{contact_id}/conversations", response_model=List[schemas.ConversationResponse], summary="Get conversations for a contact")
+def admin_read_contact_conversations(contact_id: int, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    if not crud.get_contact(db, contact_id=contact_id):
+        raise HTTPException(status_code=404, detail="Contact not found.")
+    return crud.get_conversations_for_contact(db, contact_id=contact_id, skip=skip, limit=limit)
 
 # --- Main execution (for local development) ---
 if __name__ == "__main__":
     import uvicorn
-    # Ensure GOOGLE_API_KEY is set before running
-    if not GOOGLE_API_KEY:
-        print("ERROR: The GOOGLE_API_KEY environment variable is not set.")
-        print("Please set it before running the application, e.g.:")
-        print("export GOOGLE_API_KEY='your_actual_api_key'")
-    else:
-        print("GOOGLE_API_KEY found.")
+    from dotenv import load_dotenv # Ensure dotenv is imported for __main__
+    load_dotenv()
 
-    if WHATSAPP_VERIFY_TOKEN == "YOUR_CHOSEN_VERIFY_TOKEN":
-        print("WARNING: WHATSAPP_VERIFY_TOKEN is not set in environment variables. Using default placeholder.")
-    if WHATSAPP_ACCESS_TOKEN == "YOUR_WHATSAPP_ACCESS_TOKEN":
-        print("WARNING: WHATSAPP_ACCESS_TOKEN is not set in environment variables. Actual sending will be skipped.")
-    if WHATSAPP_PHONE_NUMBER_ID == "YOUR_WHATSAPP_PHONE_NUMBER_ID":
-        print("WARNING: WHATSAPP_PHONE_NUMBER_ID is not set in environment variables. Actual sending will be impacted.")
+    print(f"Attempting to connect to database: {os.getenv('DATABASE_URL')}")
+    # Table creation is now at the top of the file.
 
+    if not GOOGLE_API_KEY: print("ERROR: GOOGLE_API_KEY environment variable is not set.")
+    else: print("GOOGLE_API_KEY found.")
 
-    # Create data directory if it doesn't exist, relative to this script
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    data_dir_abs = os.path.join(script_dir, CHROMA_DATA_PATH)
-    os.makedirs(data_dir_abs, exist_ok=True)
-    print(f"ChromaDB data path: {os.path.abspath(data_dir_abs)}")
+    if not WHATSAPP_VERIFY_TOKEN or WHATSAPP_VERIFY_TOKEN == "YOUR_ENV_VERIFY_TOKEN":
+        print("WARNING: WHATSAPP_VERIFY_TOKEN is not set correctly in .env. Webhook verification might fail.")
 
-    print("Starting server...")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # ChromaDB data path already created at top if needed.
+    print(f"ChromaDB data path: {os.path.abspath(CHROMA_DATA_PATH)}")
 
-# Instructions for running:
-# 1. Save this file as `main.py` in the `backend` directory.
-# 2. Ensure you have `requirements.txt` in the same directory. (Add `httpx` if not already there)
-# 3. Install dependencies: `pip install -r requirements.txt`
-# 4. Set your Environment Variables:
-#    `export GOOGLE_API_KEY='your_google_api_key'`
-#    `export WHATSAPP_VERIFY_TOKEN='your_chosen_verify_token_for_webhook_setup'`
-#    `export WHATSAPP_ACCESS_TOKEN='your_whatsapp_business_api_token'`
-#    `export WHATSAPP_PHONE_NUMBER_ID='your_whatsapp_business_phone_number_id'`
-# 5. Run the server: `python main.py` (or `uvicorn main:app --reload` for development)
-#    The server will be available at http://localhost:8000
-#    The WhatsApp webhook endpoint will be http://<your_public_ngrok_url>/whatsapp/webhook
+    print("Starting FastAPI server on http://0.0.0.0:8000")
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
 
-# When setting up the webhook with Meta/Twilio, you'll need a publicly accessible URL.
-# Use a tool like ngrok (https://ngrok.com/) during development: `./ngrok http 8000`
-# Then use the https URL ngrok provides (e.g., https://xxxx-yyy-zzz.ngrok.io/whatsapp/webhook)
-# in your WhatsApp API provider's dashboard.
-print(f"Current working directory: {os.getcwd()}")
-_script_dir = os.path.dirname(os.path.abspath(__file__))
-_data_dir_abs = os.path.join(_script_dir, CHROMA_DATA_PATH)
-if not os.path.exists(_data_dir_abs):
-    print(f"Warning: ChromaDB data directory '{_data_dir_abs}' does not exist. It will be created by ChromaDB if possible, or an error may occur.")
-else:
-    print(f"ChromaDB data directory '{_data_dir_abs}' confirmed.")
+# General Instructions:
+# 1. Create .env in backend/: `DATABASE_URL=postgresql://user:pass@host:port/db`, `GOOGLE_API_KEY=...`, `WHATSAPP_VERIFY_TOKEN=...`
+# 2. `pip install -r requirements.txt` (ensure `vobject`, `python-docx`, `langchain`, etc. are listed)
+# 3. Run: `python main.py`
+# 4. For WhatsApp Webhook: Use ngrok (`./ngrok http 8000`), provide HTTPS URL to Meta. Configure a default WA account via API/Admin.

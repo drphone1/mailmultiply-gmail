@@ -9,3 +9,7 @@ langchain
 chromadb
 google-generativeai
 httpx
+psycopg2-binary
+SQLAlchemy
+python-dotenv
+pydantic[email] # For email validation in schemas, if needed
