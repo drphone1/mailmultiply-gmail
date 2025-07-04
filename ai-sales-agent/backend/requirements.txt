@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pypdf2
+python-docx
+beautifulsoup4
+requests
+langchain
+chromadb
+google-generativeai
